@@ -66,10 +66,8 @@ class Instructor:
         """绘制并保存混淆矩阵"""
         os.makedirs(save_dir, exist_ok=True)
 
-        # 计算混淆矩阵
         cm = confusion_matrix(labels, predictions)
 
-        # 绘制混淆矩阵
         plt.figure(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                     xticklabels=['Negative', 'Neutral', 'Positive'],
@@ -78,7 +76,6 @@ class Instructor:
         plt.ylabel('True')
         plt.title(f'Confusion Matrix\nEpoch {epoch + 1}, Run {run_number}, F1: {macro_f1:.4f}')
 
-        # 保存图片
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f'confusion_matrix_{self.opt.dataset}_run{run_number}_epoch{epoch + 1}_f1_{macro_f1:.4f}_{timestamp}.png'
         save_path = os.path.join(save_dir, filename)
@@ -94,7 +91,6 @@ class Instructor:
         correct_predictions = 0
         n_total = 0
         for i_batch, sample_batched in enumerate(self.train_data_loader):
-            # print(i_batch)
             inputs = [sample_batched[col].to(self.opt.device) for col in self.opt.inputs_cols]
             outputs = self.model(inputs)
             targets = sample_batched['targets'].to(self.opt.device)
@@ -109,7 +105,6 @@ class Instructor:
             scheduler.step()
             optimizer.zero_grad()
 
-        # print('train'+str(n_total))
         return correct_predictions / n_total, np.mean(losses)
 
     def eval_model(self, loss_fn, type):
@@ -166,15 +161,13 @@ class Instructor:
         experiment_variant = getattr(self.opt, 'EXPERIMENT_VARIANT', 'full_model')
         result_suffix = "" if experiment_variant == "full_model" else f"_{experiment_variant}"
 
-        # 论文中用于展示训练轮数影响的代表性节点
+        # 论文中用于展示训练轮数影响的代表性节点（只记录验证集指标）
         report_epochs = {5, 10, 15, 20, 25}
         os.makedirs('./models', exist_ok=True)
         os.makedirs('./result', exist_ok=True)
         print(f"Experiment variant: {experiment_variant}")
 
         for run_number, current_seed in enumerate(self.opt.RANDOM_SEEDS):
-            # np.random.seed(self.opt.RANDOM_SEEDS[run_number] + 1)
-            # torch.manual_seed(self.opt.RANDOM_SEEDS[run_number] + 1)
             self.opt.SEED = current_seed
             random.seed(current_seed)
             np.random.seed(current_seed)
@@ -184,39 +177,34 @@ class Instructor:
                 f"\n===== RUN {run_number + 1}/{len(self.opt.RANDOM_SEEDS)} "
                 f"| SEED {current_seed} ====="
             )
-            # np.random.seed(1)
-            # torch.manual_seed(1)
-            # seed_num = 3
+
             self.model = self.opt.model_class(self.opt).to(self.opt.device)
 
-            # 每次手动运行一个种子，记录验证集最高 Macro-F1 对应的 epoch
+            # ===== 标准流程：仅根据验证集 Macro-F1 选择最佳 epoch =====
             best_dev_f1 = -1.0
             best_dev_epoch = 0
-            best_test_metrics = None
-            # Track maximum test Macro-F1 following the original evaluation protocol.
-            best_test_f1 = -1.0
-            best_test_epoch = 0
-            best_test_metrics_max = None
+            best_dev_metrics = None
             report_epoch_results = {}
+
             best_model_path = (
                 f'./models/best_model_{self.opt.dataset}{result_suffix}_seed{current_seed}.pth'
             )
 
-            # Configure the optimizer and scheduler.
-            # 优化器
+            # 优化器与调度器
             optimizer = AdamW(self.model.parameters(), lr=self.opt.LEARNING_RATE)
             total_steps = len(self.train_data_loader) * self.opt.EPOCHS
             scheduler = get_linear_schedule_with_warmup(
                 optimizer, num_warmup_steps=self.opt.NUM_WARMUP_STEPS, num_training_steps=total_steps
             )
-            # 损失函数
             loss_fn = nn.CrossEntropyLoss().to(self.opt.device)
+
             for epoch in range(self.opt.EPOCHS):
                 print(f"Epoch {epoch + 1}/{self.opt.EPOCHS} -- RUN {run_number}")
                 print("-" * 30)
                 train_acc, train_loss = self.train_epoch(loss_fn, optimizer, scheduler)
                 print(f"Train loss {train_loss} accuracy {train_acc}")
 
+                # 只在验证集上评估
                 val_acc, val_loss, val_detailed_results = self.eval_model(loss_fn, "dev")
                 print(f"Val   loss {val_loss} accuracy {val_acc}")
 
@@ -230,93 +218,88 @@ class Instructor:
                     val_labels, val_predictions, average='macro', zero_division=0
                 )
 
-                test_acc, _, detailed_results = self.eval_model(loss_fn, 'test')
-                labels = detailed_results['label']
-                predictions = detailed_results['prediction']
-                macro_f1 = f1_score(detailed_results.label, detailed_results.prediction, average="macro")
-                macro_precision = precision_score(labels, predictions, average='macro', zero_division=0)
-                macro_recall = recall_score(labels, predictions, average='macro', zero_division=0)
-
                 epoch_number = epoch + 1
 
-                current_test_metrics = {
-                    "accuracy": float(test_acc),
-                    "macro-f1": float(macro_f1),
-                    "precision": float(macro_precision),
-                    "recall": float(macro_recall)
+                current_dev_metrics = {
+                    "accuracy": float(val_acc),
+                    "macro-f1": float(val_macro_f1),
+                    "precision": float(val_macro_precision),
+                    "recall": float(val_macro_recall)
                 }
 
-                # Update and save the test-best checkpoint for the current seed.
-                if macro_f1 > best_test_f1:
-                    best_test_f1 = float(macro_f1)
-                    best_test_epoch = epoch_number
-                    best_test_metrics_max = current_test_metrics.copy()
+                # 只根据验证集 Macro-F1 保存最佳模型
+                if val_macro_f1 > best_dev_f1:
+                    best_dev_f1 = float(val_macro_f1)
+                    best_dev_epoch = epoch_number
+                    best_dev_metrics = current_dev_metrics.copy()
                     torch.save({
                         'model_state_dict': self.model.state_dict(),
                         'opt': self.opt,
                         'seed': self.opt.SEED,
-                        'epoch': best_test_epoch,
-                        'best_test_f1': best_test_f1,
-                        'test_metrics_at_best_test_epoch': best_test_metrics_max
+                        'epoch': best_dev_epoch,
+                        'best_dev_f1': best_dev_f1,
+                        'dev_metrics_at_best_dev_epoch': best_dev_metrics
                     }, best_model_path)
                     print(
-                        f"保存测试集 Macro-F1 最佳模型，Epoch: {best_test_epoch}, "
-                        f"Test Macro-F1: {best_test_f1:.4f}"
+                        f"保存验证集最佳模型，Epoch: {best_dev_epoch}, "
+                        f"Val Macro-F1: {best_dev_f1:.4f}"
                     )
                 else:
-                    print('当前 epoch 不是测试集 Macro-F1 最佳模型，不保存')
+                    print('当前 epoch 不是验证集最佳模型，不保存')
 
-                # 单独记录第 5、10、15、20、25 epoch 的验证集与测试集结果
+                # 记录代表性 epoch 的验证集结果
                 if epoch_number in report_epochs:
                     report_epoch_results[str(epoch_number)] = {
-                        "validation": {
-                            "accuracy": float(val_acc),
-                            "macro-f1": float(val_macro_f1),
-                            "precision": float(val_macro_precision),
-                            "recall": float(val_macro_recall)
-                        },
-                        "test": {
-                            "accuracy": float(test_acc),
-                            "macro-f1": float(macro_f1),
-                            "precision": float(macro_precision),
-                            "recall": float(macro_recall)
-                        }
+                        "validation": current_dev_metrics.copy()
                     }
-                    print(f"已记录 Epoch {epoch_number} 的代表性验证集和测试集结果")
+                    print(f"已记录 Epoch {epoch_number} 的代表性验证集结果")
 
-                # Validation-best is retained for analysis only and does not
-                # control checkpoint saving.
-                if val_macro_f1 > best_dev_f1:
-                    best_dev_f1 = float(val_macro_f1)
-                    best_dev_epoch = epoch_number
-                    best_test_metrics = current_test_metrics.copy()
-                    print(
-                        f"更新验证集最佳记录，Epoch: {best_dev_epoch}, "
-                        f"Validation Macro-F1: {best_dev_f1:.4f}"
-                    )
+                print(f"VAL ACC = {val_acc:.4f}\n"
+                      f"VAL MACRO F1 = {val_macro_f1:.4f}\n"
+                      f"Precision = {val_macro_precision:.4f}\n"
+                      f"Recall = {val_macro_recall:.4f}")
 
-                # 新增：如果F1分数大于0.745，保存混淆矩阵
-                if macro_f1 > 0.745:
-                    self.plot_confusion_matrix(labels, predictions, epoch, run_number, macro_f1)
-                    print(f"F1分数 {macro_f1:.4f} > 0.705，已保存混淆矩阵")
+            # ===== 训练结束：加载验证集最佳模型，在测试集上评估一次 =====
+            print(f"\n加载验证集最佳模型: {best_model_path} (Epoch {best_dev_epoch})")
+            checkpoint = torch.load(best_model_path, map_location=self.opt.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
 
-                print(f"TEST ACC = {test_acc:.4f}\n"
-                      f"MACRO F1 = {macro_f1:.4f}\n"
-                      f"Precision = {macro_precision:.4f}\n"
-                      f"Recall = {macro_recall:.4f}")
+            test_acc, test_loss, detailed_results = self.eval_model(loss_fn, 'test')
+            labels = detailed_results['label']
+            predictions = detailed_results['prediction']
+            test_macro_f1 = f1_score(labels, predictions, average="macro")
+            test_macro_precision = precision_score(labels, predictions, average='macro', zero_division=0)
+            test_macro_recall = recall_score(labels, predictions, average='macro', zero_division=0)
+
+            test_metrics = {
+                "accuracy": float(test_acc),
+                "macro-f1": float(test_macro_f1),
+                "precision": float(test_macro_precision),
+                "recall": float(test_macro_recall)
+            }
+
+            print(f"\nTEST ACC = {test_acc:.4f}\n"
+                  f"TEST MACRO F1 = {test_macro_f1:.4f}\n"
+                  f"Precision = {test_macro_precision:.4f}\n"
+                  f"Recall = {test_macro_recall:.4f}")
+
+            # 在测试集上绘制混淆矩阵（仅最佳验证集模型一次）
+            try:
+                self.plot_confusion_matrix(
+                    labels, predictions, best_dev_epoch - 1, run_number, test_macro_f1
+                )
+            except Exception as e:
+                print(f"混淆矩阵绘制失败（可能缺少中文/字体）：{e}")
 
             results_per_run[str(current_seed)] = {
                 "seed": current_seed,
                 "experiment_variant": experiment_variant,
                 "best_dev_epoch": best_dev_epoch,
                 "best_dev_macro-f1": best_dev_f1,
-                "test_at_best_dev_epoch": best_test_metrics,
-                "best_test_epoch": best_test_epoch,
-                "best_test_macro-f1": best_test_f1,
-                "test_at_best_test_epoch": best_test_metrics_max,
+                "dev_metrics_at_best_dev_epoch": best_dev_metrics,
+                "test_metrics_at_best_dev_epoch": test_metrics,
                 "best_model_path": best_model_path,
-                "primary_result_source": "test_at_best_test_epoch",
-                "best_test_result_role": "primary_evaluation_result",
+                "primary_result_source": "test_at_best_dev_epoch",
                 "report_epochs": report_epoch_results
             }
 
@@ -331,6 +314,7 @@ class Instructor:
                     indent=2
                 )
             print(f"Seed {current_seed} result saved to: {seed_result_path}")
+
         seed_result_path = (
             f'./result/results_{self.opt.dataset}{result_suffix}_all_seeds.json'
         )
@@ -365,23 +349,13 @@ class Instructor:
             "seeds": self.opt.RANDOM_SEEDS,
             "std_definition": "sample standard deviation (ddof=1; 0.0 for one seed)",
             "paper_result": {
-                "selection_rule": "maximum test Macro-F1 per seed",
-                "metric_source": "test_at_best_test_epoch",
-                "aggregate": aggregate("test_at_best_test_epoch")
-            },
-            "validation_selected_reference": {
                 "selection_rule": "maximum validation Macro-F1 per seed",
-                "metric_source": "test_at_best_dev_epoch",
-                "aggregate": aggregate("test_at_best_dev_epoch")
+                "metric_source": "test_metrics_at_best_dev_epoch",
+                "aggregate": aggregate("test_metrics_at_best_dev_epoch")
             },
             "per_seed": results_per_run
         }
-        # 记录最大值
-        '''curr_time = datetime.now()
-        time_str = str(datetime.strftime(curr_time, '%Y-%m-%d_%H-%M-%S'))
-        with open('./result/' + time_str + '.json', 'w+') as f:
-            json.dump(resMax, f)
-        print(resMax)'''
+
         curr_time = datetime.now()
         time_str = (
             f"{datetime.strftime(curr_time, '%Y-%m-%d_%H-%M-%S')}_"
@@ -390,10 +364,6 @@ class Instructor:
         with open(f'./result/{time_str}.json', 'w+', encoding='utf-8') as f:
             json.dump(resMax, f, ensure_ascii=False, indent=2)
         print(resMax)
-
-        # 计算平均值
-        '''print(f"AVERAGE ACC = {np.mean([_['accuracy'] for _ in results_per_run.values()])}")
-        print(f"AVERAGE MAC-F1= {np.mean([_['macro-f1'] for _ in results_per_run.values()])}")'''
 
 
 def main():
